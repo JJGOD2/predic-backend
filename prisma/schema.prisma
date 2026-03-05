@@ -1,0 +1,256 @@
+// prisma/schema.prisma
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ── Users ────────────────────────────────────────────
+model User {
+  id            String   @id @default(uuid())
+  username      String   @unique @db.VarChar(20)
+  email         String   @unique @db.VarChar(255)
+  phone         String?  @db.VarChar(20)
+  passwordHash  String   @map("password_hash")
+  avatarUrl     String?  @map("avatar_url")
+  bio           String?
+
+  // 雙幣制
+  score         BigInt   @default(1000)
+  gem           Int      @default(0)
+  ntdBalance    Decimal  @default(0) @map("ntd_balance") @db.Decimal(12, 2)
+
+  // PRO
+  isPro             Boolean   @default(false) @map("is_pro")
+  proExpiresAt      DateTime? @map("pro_expires_at")
+  proNotifEnabled   Boolean   @default(true) @map("pro_notif_enabled")
+
+  // 狀態
+  status            String    @default("active") @db.VarChar(20)
+  emailVerified     Boolean   @default(false) @map("email_verified")
+  phoneVerified     Boolean   @default(false) @map("phone_verified")
+  lastLoginAt       DateTime? @map("last_login_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  trades            Trade[]
+  notifications     Notification[]
+  comments          MarketComment[]
+  checkins          UserCheckin[]
+  dailyTasks        DailyTask[]
+  inventory         UserInventory[]
+  proSubs           ProSubscription[]
+  pushSubs          PushSubscription[]
+  referralsGiven    ReferralReward[] @relation("referrer")
+  referralsReceived ReferralReward[] @relation("referee")
+
+  @@map("users")
+}
+
+// ── Markets ──────────────────────────────────────────
+model Market {
+  id                  String    @id @default(uuid())
+  slug                String    @unique @db.VarChar(100)
+  category            String    @db.VarChar(30)
+  icon                String    @db.VarChar(10)
+  question            String
+  description         String?
+
+  yesPct              Decimal   @default(50) @map("yes_pct") @db.Decimal(5, 2)
+  resolution          String?   @db.VarChar(10)   // pending|yes|no|voided
+
+  volumeScore         BigInt    @default(0) @map("volume_score")
+  participantCount    Int       @default(0) @map("participant_count")
+
+  endsAt              DateTime  @map("ends_at")
+  resolvedAt          DateTime? @map("resolved_at")
+
+  isHot               Boolean   @default(false) @map("is_hot")
+  isSponsored         Boolean   @default(false) @map("is_sponsored")
+  sponsorName         String?   @map("sponsor_name") @db.VarChar(100)
+  communityThreshold  Int       @default(2000) @map("community_threshold")
+
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  trades              Trade[]
+  comments            MarketComment[]
+  probHistory         ProbabilityLog[]
+
+  @@index([category])
+  @@index([endsAt])
+  @@index([isHot])
+  @@map("markets")
+}
+
+// ── Trades ───────────────────────────────────────────
+model Trade {
+  id          String    @id @default(uuid())
+  userId      String    @map("user_id")
+  marketId    String    @map("market_id")
+
+  direction   String    @db.VarChar(3)    // yes|no
+  amount      BigInt
+  entryPct    Decimal   @map("entry_pct") @db.Decimal(5, 2)
+
+  status      String    @default("open") @db.VarChar(20)  // open|won|lost|voided
+  pnl         BigInt?
+  settledAt   DateTime? @map("settled_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  market      Market    @relation(fields: [marketId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([marketId])
+  @@index([status])
+  @@map("trades")
+}
+
+// ── Notifications ────────────────────────────────────
+model Notification {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  type      String   @db.VarChar(30)   // result|reward|system|promo|social
+  icon      String   @db.VarChar(10)
+  title     String   @db.VarChar(100)
+  body      String
+  link      String?
+  isRead    Boolean  @default(false) @map("is_read")
+  isPushed  Boolean  @default(false) @map("is_pushed")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead])
+  @@index([createdAt(sort: Desc)])
+  @@map("notifications")
+}
+
+// ── Market Comments ──────────────────────────────────
+model MarketComment {
+  id        String   @id @default(uuid())
+  marketId  String   @map("market_id")
+  userId    String   @map("user_id")
+  content   String
+  likes     Int      @default(0)
+  parentId  String?  @map("parent_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  market    Market   @relation(fields: [marketId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([marketId])
+  @@map("market_comments")
+}
+
+// ── Probability Log ──────────────────────────────────
+model ProbabilityLog {
+  id         String   @id @default(uuid())
+  marketId   String   @map("market_id")
+  yesPct     Decimal  @map("yes_pct") @db.Decimal(5, 2)
+  recordedAt DateTime @default(now()) @map("recorded_at")
+
+  market     Market   @relation(fields: [marketId], references: [id], onDelete: Cascade)
+
+  @@index([marketId, recordedAt])
+  @@map("probability_log")
+}
+
+// ── User Checkins ────────────────────────────────────
+model UserCheckin {
+  id          String   @id @default(uuid())
+  userId      String   @map("user_id")
+  date        DateTime @db.Date
+  streak      Int      @default(1)
+  rewardScore Int      @default(10) @map("reward_score")
+  rewardGem   Int      @default(0)  @map("reward_gem")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, date])
+  @@map("user_checkins")
+}
+
+// ── Daily Tasks ──────────────────────────────────────
+model DailyTask {
+  id          String    @id @default(uuid())
+  userId      String    @map("user_id")
+  date        DateTime  @db.Date
+  taskKey     String    @map("task_key") @db.VarChar(50)
+  progress    Int       @default(0)
+  target      Int       @default(1)
+  completedAt DateTime? @map("completed_at")
+  rewardClaimed Boolean @default(false) @map("reward_claimed")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, date, taskKey])
+  @@map("daily_tasks")
+}
+
+// ── User Inventory ───────────────────────────────────
+model UserInventory {
+  id          String   @id @default(uuid())
+  userId      String   @map("user_id")
+  itemKey     String   @map("item_key") @db.VarChar(50)
+  quantity    Int      @default(1)
+  acquiredAt  DateTime @default(now()) @map("acquired_at")
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, itemKey])
+  @@map("user_inventory")
+}
+
+// ── PRO Subscriptions ────────────────────────────────
+model ProSubscription {
+  id          String   @id @default(uuid())
+  userId      String   @map("user_id")
+  plan        String   @db.VarChar(20)   // monthly|yearly
+  priceNtd    Decimal  @map("price_ntd") @db.Decimal(8, 2)
+  startsAt    DateTime @map("starts_at")
+  expiresAt   DateTime @map("expires_at")
+  status      String   @default("active") @db.VarChar(20)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("pro_subscriptions")
+}
+
+// ── Push Subscriptions (Web Push VAPID) ─────────────
+model PushSubscription {
+  id           String   @id @default(uuid())
+  userId       String   @map("user_id")
+  endpoint     String   @unique
+  p256dh       String
+  auth         String
+  userAgent    String?  @map("user_agent")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("push_subscriptions")
+}
+
+// ── Referral Rewards ─────────────────────────────────
+model ReferralReward {
+  id           String   @id @default(uuid())
+  referrerId   String   @map("referrer_id")
+  refereeId    String   @map("referee_id")
+  rewardScore  Int      @map("reward_score")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  referrer     User     @relation("referrer", fields: [referrerId], references: [id])
+  referee      User     @relation("referee",  fields: [refereeId],  references: [id])
+
+  @@map("referral_rewards")
+}
