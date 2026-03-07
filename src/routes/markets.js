@@ -21,7 +21,6 @@ const HISTORY_QUERY_SCHEMA = z.object({
 });
 
 module.exports = async function marketsRoutes(app) {
-  // GET /v1/markets
   app.get('/', async (req, reply) => {
     const parsed = LIST_QUERY_SCHEMA.safeParse(req.query);
     if (!parsed.success) {
@@ -29,7 +28,7 @@ module.exports = async function marketsRoutes(app) {
     }
 
     const { category, q, sort, page, limit } = parsed.data;
-    const cacheKey = `markets:v2:list:${JSON.stringify(parsed.data)}`;
+    const cacheKey = `markets:v3:list:${JSON.stringify(parsed.data)}`;
 
     const cached = await getCache(app, cacheKey);
     if (cached) return reply.send(cached);
@@ -49,22 +48,24 @@ module.exports = async function marketsRoutes(app) {
       app.prisma.market.count({ where }),
     ]);
 
-    const data = markets.map((market) => formatMarketListItem(market));
-    const response = successResponse(data, {
-      total,
-      page,
-      limit,
-      hasMore: page * limit < total,
-      query: { category: category || 'all', q: q || '', sort },
-    });
+    const items = markets.map((market) => formatMarketListItem(market));
+    const response = successResponse(
+      { items },
+      {
+        total,
+        page,
+        limit,
+        hasMore: page * limit < total,
+        query: { category: category || 'all', q: q || '', sort },
+      }
+    );
 
     await setCache(app, cacheKey, response, LIST_CACHE_TTL);
     return reply.send(response);
   });
 
-  // GET /v1/markets/counts
   app.get('/counts', async (_req, reply) => {
-    const cacheKey = 'markets:v2:counts';
+    const cacheKey = 'markets:v3:counts';
     const cached = await getCache(app, cacheKey);
     if (cached) return reply.send(cached);
 
@@ -72,23 +73,22 @@ module.exports = async function marketsRoutes(app) {
     const closingAt = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
     const baseWhere = buildOpenMarketWhere();
 
-    const [
-      all,
-      trending,
-      closing,
-      byCategory,
-    ] = await Promise.all([
+    const [all, trending, closing, byCategory] = await Promise.all([
       app.prisma.market.count({ where: baseWhere }),
       app.prisma.market.count({
         where: {
-          ...baseWhere,
-          OR: [{ isHot: true }, { sortScore: { gt: 0 } }],
+          AND: [
+            baseWhere,
+            { OR: [{ isHot: true }, { sortScore: { gt: 0 } }] },
+          ],
         },
       }),
       app.prisma.market.count({
         where: {
-          ...baseWhere,
-          endsAt: { gt: now, lte: closingAt },
+          AND: [
+            baseWhere,
+            { endsAt: { gt: now, lte: closingAt } },
+          ],
         },
       }),
       app.prisma.market.groupBy({
@@ -119,7 +119,6 @@ module.exports = async function marketsRoutes(app) {
     return reply.send(response);
   });
 
-  // GET /v1/markets/:idOrSlug/probability-history
   app.get('/:idOrSlug/probability-history', async (req, reply) => {
     const parsed = HISTORY_QUERY_SCHEMA.safeParse(req.query);
     if (!parsed.success) {
@@ -128,7 +127,7 @@ module.exports = async function marketsRoutes(app) {
 
     const { idOrSlug } = req.params;
     const { range } = parsed.data;
-    const cacheKey = `markets:v2:history:${idOrSlug}:${range}`;
+    const cacheKey = `markets:v3:history:${idOrSlug}:${range}`;
     const cached = await getCache(app, cacheKey);
     if (cached) return reply.send(cached);
 
@@ -151,7 +150,7 @@ module.exports = async function marketsRoutes(app) {
     const points = await app.prisma.probabilityLog.findMany({
       where: {
         marketId: market.id,
-        recordedAt: since ? { gte: since } : undefined,
+        ...(since ? { recordedAt: { gte: since } } : {}),
       },
       orderBy: { recordedAt: 'asc' },
       select: {
@@ -179,10 +178,9 @@ module.exports = async function marketsRoutes(app) {
     return reply.send(response);
   });
 
-  // GET /v1/markets/:idOrSlug
   app.get('/:idOrSlug', async (req, reply) => {
     const { idOrSlug } = req.params;
-    const cacheKey = `markets:v2:detail:${idOrSlug}`;
+    const cacheKey = `markets:v3:detail:${idOrSlug}`;
     const cached = await getCache(app, cacheKey);
     if (cached) return reply.send(cached);
 
@@ -224,12 +222,8 @@ module.exports = async function marketsRoutes(app) {
           mode: 'buy',
           remainingAmount: { gt: 0 },
         },
-        _sum: {
-          remainingAmount: true,
-        },
-        _count: {
-          direction: true,
-        },
+        _sum: { remainingAmount: true },
+        _count: { direction: true },
       }),
       app.prisma.probabilityLog.findMany({
         where: { marketId: market.id },
@@ -322,40 +316,39 @@ function marketDetailSelect() {
 }
 
 function buildMarketsWhere({ category, q }) {
-  const where = buildOpenMarketWhere();
+  const andWhere = [buildOpenMarketWhere()];
 
   if (category === 'trending') {
-    where.OR = [{ isHot: true }, { sortScore: { gt: 0 } }];
+    andWhere.push({
+      OR: [{ isHot: true }, { sortScore: { gt: 0 } }],
+    });
   } else if (category === 'closing') {
     const now = new Date();
     const closingAt = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
-    where.endsAt = { gt: now, lte: closingAt };
+    andWhere.push({
+      endsAt: { gt: now, lte: closingAt },
+    });
   } else if (category && category !== 'all') {
-    where.category = category;
+    andWhere.push({ category });
   }
 
   if (q) {
-    where.OR = mergeOr(where.OR, [
-      { question: { contains: q, mode: 'insensitive' } },
-      { description: { contains: q, mode: 'insensitive' } },
-      { tag: { contains: q, mode: 'insensitive' } },
-      { sponsorName: { contains: q, mode: 'insensitive' } },
-    ]);
+    andWhere.push({
+      OR: [
+        { question: { contains: q, mode: 'insensitive' } },
+        { description: { contains: q, mode: 'insensitive' } },
+        { tag: { contains: q, mode: 'insensitive' } },
+        { sponsorName: { contains: q, mode: 'insensitive' } },
+        { slug: { contains: q, mode: 'insensitive' } },
+      ],
+    });
   }
 
-  return where;
+  return andWhere.length === 1 ? andWhere[0] : { AND: andWhere };
 }
 
 function buildOpenMarketWhere() {
-  return {
-    OR: [
-      { status: 'open' },
-      {
-        status: null,
-        resolution: null,
-      },
-    ],
-  };
+  return { status: 'open' };
 }
 
 function buildMarketsOrderBy(sort) {
@@ -490,12 +483,7 @@ function tagClassForCategory(category) {
 
 function getHistorySince(range) {
   if (range === 'ALL') return null;
-  const map = {
-    '1D': 1,
-    '1W': 7,
-    '1M': 30,
-    '3M': 90,
-  };
+  const map = { '1D': 1, '1W': 7, '1M': 30, '3M': 90 };
   const days = map[range] || 7;
   return new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 }
@@ -523,9 +511,7 @@ function formatVolume(value) {
 function bigIntToNumber(value) {
   if (typeof value === 'bigint') return Number(value);
   if (value == null) return 0;
-  if (typeof value === 'object' && typeof value.toString === 'function') {
-    return Number(value.toString());
-  }
+  if (typeof value === 'object' && typeof value.toString === 'function') return Number(value.toString());
   return Number(value);
 }
 
@@ -533,9 +519,7 @@ function toNumber(value) {
   if (value == null) return 0;
   if (typeof value === 'number') return value;
   if (typeof value === 'bigint') return Number(value);
-  if (typeof value === 'object' && typeof value.toString === 'function') {
-    return Number(value.toString());
-  }
+  if (typeof value === 'object' && typeof value.toString === 'function') return Number(value.toString());
   return Number(value);
 }
 
@@ -553,27 +537,14 @@ function timeAgo(date) {
   return `${days}天前`;
 }
 
-function mergeOr(existingOr, items) {
-  if (!existingOr || existingOr.length === 0) return items;
-  return existingOr.concat(items);
-}
-
 function successResponse(data, meta = {}) {
-  return {
-    data,
-    error: null,
-    meta,
-  };
+  return { data, error: null, meta };
 }
 
 function sendError(reply, statusCode, code, message, details = null) {
   return reply.code(statusCode).send({
     data: null,
-    error: {
-      code,
-      message,
-      details,
-    },
+    error: { code, message, details },
     meta: {},
   });
 }
@@ -592,7 +563,5 @@ async function setCache(app, key, payload, ttl) {
   if (!app.redis) return;
   try {
     await app.redis.setex(key, ttl, JSON.stringify(payload));
-  } catch {
-    // ignore cache write errors
-  }
+  } catch {}
 }
