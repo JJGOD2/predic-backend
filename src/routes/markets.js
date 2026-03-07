@@ -3,239 +3,596 @@
 
 const { z } = require('zod');
 
-const CACHE_TTL = 30; // seconds
+const LIST_CACHE_TTL = 30;
+const COUNTS_CACHE_TTL = 30;
+const DETAIL_CACHE_TTL = 20;
+const HISTORY_CACHE_TTL = 20;
 
-module.exports = async function (app) {
+const LIST_QUERY_SCHEMA = z.object({
+  category: z.string().trim().optional(),
+  q: z.string().trim().max(100).optional(),
+  sort: z.enum(['hot', 'new', 'ending', 'volume', 'participants', 'trending']).optional().default('hot'),
+  page: z.coerce.number().int().positive().optional().default(1),
+  limit: z.coerce.number().int().min(1).max(50).optional().default(20),
+});
 
-  // ── GET /v1/markets ────────────────────────────────
+const HISTORY_QUERY_SCHEMA = z.object({
+  range: z.enum(['1D', '1W', '1M', '3M', 'ALL']).optional().default('1W'),
+});
+
+module.exports = async function marketsRoutes(app) {
+  // GET /v1/markets
   app.get('/', async (req, reply) => {
-    const schema = z.object({
-      category: z.string().optional(),
-      q:        z.string().optional(),
-      sort:     z.enum(['hot', 'new', 'ending', 'volume']).optional().default('hot'),
-      page:     z.coerce.number().int().positive().optional().default(1),
-      limit:    z.coerce.number().int().min(1).max(50).optional().default(20),
-    });
-
-    const query = schema.safeParse(req.query);
-    if (!query.success) {
-      return reply.code(400).send({ ok: false, error: { code: 'VALIDATION_ERROR', message: '查詢參數錯誤' } });
+    const parsed = LIST_QUERY_SCHEMA.safeParse(req.query);
+    if (!parsed.success) {
+      return sendError(reply, 400, 'VALIDATION_ERROR', '查詢參數錯誤', parsed.error.flatten());
     }
 
-    const { category, q, sort, page, limit } = query.data;
+    const { category, q, sort, page, limit } = parsed.data;
+    const cacheKey = `markets:v2:list:${JSON.stringify(parsed.data)}`;
 
-    // Try Redis cache first
-    const cacheKey = `markets:list:${JSON.stringify(query.data)}`;
-    if (app.redis) {
-      const cached = await app.redis.get(cacheKey);
-      if (cached) return reply.send(JSON.parse(cached));
-    }
+    const cached = await getCache(app, cacheKey);
+    if (cached) return reply.send(cached);
 
-    const where = {};
-    const now   = new Date();
-
-    if (category === 'trending') {
-      where.isHot = true;
-    } else if (category === 'closing') {
-      where.endsAt = { gt: now, lt: new Date(now.getTime() + 7 * 86400000) };
-    } else if (category && category !== 'all') {
-      where.category = category;
-    }
-
-    if (q) {
-      where.question = { contains: q, mode: 'insensitive' };
-    }
-
-    // Default: only pending markets
-    if (!where.resolution) where.resolution = null;
-
-    const orderBy = {
-      hot:    { participantCount: 'desc' },
-      new:    { createdAt:        'desc' },
-      ending: { endsAt:           'asc'  },
-      volume: { volumeScore:      'desc' },
-    }[sort];
+    const where = buildMarketsWhere({ category, q });
+    const orderBy = buildMarketsOrderBy(sort);
+    const skip = (page - 1) * limit;
 
     const [markets, total] = await Promise.all([
       app.prisma.market.findMany({
         where,
         orderBy,
-        skip:  (page - 1) * limit,
-        take:  limit,
-        select: marketSelect(),
+        skip,
+        take: limit,
+        select: marketListSelect(),
       }),
       app.prisma.market.count({ where }),
     ]);
 
-    const response = {
-      ok: true,
-      data: markets.map(formatMarket),
-      meta: { total, page, limit, hasMore: page * limit < total },
-    };
+    const data = markets.map((market) => formatMarketListItem(market));
+    const response = successResponse(data, {
+      total,
+      page,
+      limit,
+      hasMore: page * limit < total,
+      query: { category: category || 'all', q: q || '', sort },
+    });
 
-    if (app.redis) await app.redis.setex(cacheKey, CACHE_TTL, JSON.stringify(response));
-
-    reply.send(response);
+    await setCache(app, cacheKey, response, LIST_CACHE_TTL);
+    return reply.send(response);
   });
 
-  // ── GET /v1/markets/counts ─────────────────────────
-  app.get('/counts', async (req, reply) => {
-    const cacheKey = 'markets:counts';
-    if (app.redis) {
-      const cached = await app.redis.get(cacheKey);
-      if (cached) return reply.send(JSON.parse(cached));
-    }
+  // GET /v1/markets/counts
+  app.get('/counts', async (_req, reply) => {
+    const cacheKey = 'markets:v2:counts';
+    const cached = await getCache(app, cacheKey);
+    if (cached) return reply.send(cached);
 
-    const now     = new Date();
-    const closing = new Date(now.getTime() + 90 * 86400000);
+    const now = new Date();
+    const closingAt = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+    const baseWhere = buildOpenMarketWhere();
 
-    const [all, trending, closingCount, byCategory] = await Promise.all([
-      app.prisma.market.count({ where: { resolution: null } }),
-      app.prisma.market.count({ where: { resolution: null, isHot: true } }),
-      app.prisma.market.count({ where: { resolution: null, endsAt: { gt: now, lt: closing } } }),
+    const [
+      all,
+      trending,
+      closing,
+      byCategory,
+    ] = await Promise.all([
+      app.prisma.market.count({ where: baseWhere }),
+      app.prisma.market.count({
+        where: {
+          ...baseWhere,
+          OR: [{ isHot: true }, { sortScore: { gt: 0 } }],
+        },
+      }),
+      app.prisma.market.count({
+        where: {
+          ...baseWhere,
+          endsAt: { gt: now, lte: closingAt },
+        },
+      }),
       app.prisma.market.groupBy({
         by: ['category'],
-        where: { resolution: null },
+        where: baseWhere,
         _count: { category: true },
       }),
     ]);
 
-    const counts = { all, trending, closing: closingCount };
-    byCategory.forEach(r => { counts[r.category] = r._count.category; });
+    const counts = {
+      all,
+      trending,
+      closing,
+      politics: 0,
+      finance: 0,
+      sports: 0,
+      entertainment: 0,
+      tech: 0,
+      society: 0,
+    };
 
-    const response = { ok: true, data: counts };
-    if (app.redis) await app.redis.setex(cacheKey, CACHE_TTL, JSON.stringify(response));
-    reply.send(response);
+    for (const row of byCategory) {
+      counts[row.category] = row._count.category;
+    }
+
+    const response = successResponse(counts, {});
+    await setCache(app, cacheKey, response, COUNTS_CACHE_TTL);
+    return reply.send(response);
   });
 
-  // ── GET /v1/markets/:id ────────────────────────────
-  app.get('/:id', async (req, reply) => {
-    const market = await app.prisma.market.findFirst({
-      where: { OR: [{ id: req.params.id }, { slug: req.params.id }] },
+  // GET /v1/markets/:idOrSlug/probability-history
+  app.get('/:idOrSlug/probability-history', async (req, reply) => {
+    const parsed = HISTORY_QUERY_SCHEMA.safeParse(req.query);
+    if (!parsed.success) {
+      return sendError(reply, 400, 'VALIDATION_ERROR', '查詢參數錯誤', parsed.error.flatten());
+    }
+
+    const { idOrSlug } = req.params;
+    const { range } = parsed.data;
+    const cacheKey = `markets:v2:history:${idOrSlug}:${range}`;
+    const cached = await getCache(app, cacheKey);
+    if (cached) return reply.send(cached);
+
+    const market = await findMarketByIdOrSlug(app, idOrSlug, {
+      id: true,
+      slug: true,
+      question: true,
+      yesPct: true,
+      endsAt: true,
+      resolvedAt: true,
+      status: true,
+      resolution: true,
+    });
+
+    if (!market) {
+      return sendError(reply, 404, 'MARKET_NOT_FOUND', '找不到該預測市場');
+    }
+
+    const since = getHistorySince(range);
+    const points = await app.prisma.probabilityLog.findMany({
+      where: {
+        marketId: market.id,
+        recordedAt: since ? { gte: since } : undefined,
+      },
+      orderBy: { recordedAt: 'asc' },
       select: {
-        ...marketSelect(),
-        description: true,
-        probHistory: {
-          orderBy: { recordedAt: 'desc' },
-          take: 90,
-          select: { yesPct: true, recordedAt: true },
+        yesPct: true,
+        recordedAt: true,
+      },
+    });
+
+    const data = {
+      market_id: market.id,
+      slug: market.slug,
+      question: market.question,
+      range,
+      current_yes_pct: toNumber(market.yesPct),
+      status: market.status || deriveMarketStatus(market),
+      resolution: market.resolution || 'pending',
+      points: points.map((point) => ({
+        t: point.recordedAt,
+        yes_pct: toNumber(point.yesPct),
+      })),
+    };
+
+    const response = successResponse(data, {});
+    await setCache(app, cacheKey, response, HISTORY_CACHE_TTL);
+    return reply.send(response);
+  });
+
+  // GET /v1/markets/:idOrSlug
+  app.get('/:idOrSlug', async (req, reply) => {
+    const { idOrSlug } = req.params;
+    const cacheKey = `markets:v2:detail:${idOrSlug}`;
+    const cached = await getCache(app, cacheKey);
+    if (cached) return reply.send(cached);
+
+    const market = await findMarketByIdOrSlug(app, idOrSlug, {
+      ...marketDetailSelect(),
+      _count: {
+        select: {
+          comments: true,
+          trades: true,
         },
-        _count: { select: { comments: true } },
       },
     });
 
     if (!market) {
-      return reply.code(404).send({ ok: false, error: { code: 'MARKET_NOT_FOUND', message: '找不到該預測市場' } });
+      return sendError(reply, 404, 'MARKET_NOT_FOUND', '找不到該預測市場');
     }
 
-    // Recent trades (anonymous)
-    const recentTrades = await app.prisma.trade.findMany({
-      where:   { marketId: market.id },
-      orderBy: { createdAt: 'desc' },
-      take:    10,
-      select:  { direction: true, amount: true, createdAt: true },
-    });
+    const [recentTrades, distribution, probHistory] = await Promise.all([
+      app.prisma.trade.findMany({
+        where: {
+          marketId: market.id,
+          mode: 'buy',
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 12,
+        select: {
+          id: true,
+          direction: true,
+          amount: true,
+          mode: true,
+          createdAt: true,
+        },
+      }),
+      app.prisma.trade.groupBy({
+        by: ['direction'],
+        where: {
+          marketId: market.id,
+          status: 'open',
+          mode: 'buy',
+          remainingAmount: { gt: 0 },
+        },
+        _sum: {
+          remainingAmount: true,
+        },
+        _count: {
+          direction: true,
+        },
+      }),
+      app.prisma.probabilityLog.findMany({
+        where: { marketId: market.id },
+        orderBy: { recordedAt: 'desc' },
+        take: 90,
+        select: {
+          yesPct: true,
+          recordedAt: true,
+        },
+      }),
+    ]);
 
-    // Order book distribution (buy/no buckets)
-    const distribution = await app.prisma.trade.groupBy({
-      by: ['direction'],
-      where:  { marketId: market.id, status: 'open' },
-      _sum:   { amount: true },
-      _count: { direction: true },
-    });
-
-    reply.send({
-      ok: true,
-      data: {
-        ...formatMarket(market),
-        description: market.description,
-        commentCount: market._count.comments,
-        probHistory: market.probHistory.map(p => ({
-          t:       p.recordedAt,
-          yes_pct: Number(p.yesPct),
-        })).reverse(),
-        distribution: distribution.map(d => ({
-          direction: d.direction,
-          totalAmount: Number(d._sum.amount || 0),
-          count:       d._count.direction,
+    const data = {
+      ...formatMarketDetail(market),
+      commentCount: market._count.comments,
+      tradeCount: market._count.trades,
+      recentTrades: recentTrades.map((trade) => ({
+        id: trade.id,
+        direction: trade.direction,
+        mode: trade.mode,
+        amount: Number(trade.amount),
+        ago: timeAgo(trade.createdAt),
+        created_at: trade.createdAt,
+      })),
+      distribution: normalizeDistribution(distribution),
+      probHistory: probHistory
+        .slice()
+        .reverse()
+        .map((point) => ({
+          t: point.recordedAt,
+          yes_pct: toNumber(point.yesPct),
         })),
-        recentTrades: recentTrades.map(t => ({
-          direction: t.direction,
-          amount:    Number(t.amount),
-          ago:       timeAgo(t.createdAt),
-        })),
-      },
-    });
-  });
+    };
 
-  // ── GET /v1/markets/:id/probability-history ────────
-  app.get('/:id/probability-history', async (req, reply) => {
-    const range = req.query.range || '1W';
-    const days  = { '1D': 1, '1W': 7, '1M': 30, 'ALL': 365 }[range] || 7;
-    const since = new Date(Date.now() - days * 86400000);
-
-    const points = await app.prisma.probabilityLog.findMany({
-      where:   { marketId: req.params.id, recordedAt: { gte: since } },
-      orderBy: { recordedAt: 'asc' },
-      select:  { yesPct: true, recordedAt: true },
-    });
-
-    const market = await app.prisma.market.findUnique({
-      where:  { id: req.params.id },
-      select: { yesPct: true },
-    });
-
-    reply.send({
-      ok: true,
-      data: {
-        range,
-        market_id:       req.params.id,
-        current_yes_pct: Number(market?.yesPct || 50),
-        points: points.map(p => ({ t: p.recordedAt, yes_pct: Number(p.yesPct) })),
-      },
-    });
+    const response = successResponse(data, {});
+    await setCache(app, cacheKey, response, DETAIL_CACHE_TTL);
+    return reply.send(response);
   });
 };
 
-// ── Helpers ───────────────────────────────────────────
-function marketSelect() {
+function marketListSelect() {
   return {
-    id: true, slug: true, category: true, icon: true, question: true,
-    yesPct: true, resolution: true, volumeScore: true, participantCount: true,
-    endsAt: true, resolvedAt: true, isHot: true, isSponsored: true,
-    sponsorName: true, communityThreshold: true, createdAt: true,
+    id: true,
+    slug: true,
+    category: true,
+    icon: true,
+    tag: true,
+    question: true,
+    yesPct: true,
+    status: true,
+    resolution: true,
+    volumeScore: true,
+    participantCount: true,
+    endsAt: true,
+    resolvedAt: true,
+    isHot: true,
+    isSponsored: true,
+    sponsorName: true,
+    communityThreshold: true,
+    sortScore: true,
+    createdAt: true,
   };
 }
 
-function formatMarket(m) {
+function marketDetailSelect() {
   return {
-    id:                 m.id,
-    slug:               m.slug,
-    category:           m.category,
-    icon:               m.icon,
-    question:           m.question,
-    yes:                Number(m.yesPct),
-    no:                 100 - Number(m.yesPct),
-    resolution:         m.resolution,
-    vol:                formatVolume(Number(m.volumeScore)),
-    p:                  m.participantCount.toLocaleString(),
-    ends:               m.endsAt?.toISOString().split('T')[0].replace(/-/g, '/'),
-    hot:                m.isHot,
-    sponsored:          m.isSponsored,
-    sponsorName:        m.sponsorName,
-    communityThreshold: m.communityThreshold,
+    id: true,
+    slug: true,
+    category: true,
+    icon: true,
+    tag: true,
+    question: true,
+    description: true,
+    yesPct: true,
+    status: true,
+    resolution: true,
+    resolutionSource: true,
+    volumeScore: true,
+    participantCount: true,
+    endsAt: true,
+    resolvedAt: true,
+    isHot: true,
+    isSponsored: true,
+    sponsorName: true,
+    communityThreshold: true,
+    sortScore: true,
+    createdAt: true,
+    updatedAt: true,
   };
 }
 
-function formatVolume(n) {
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M積分';
-  if (n >= 1_000)     return (n / 1_000).toFixed(0) + 'K積分';
-  return n + '積分';
+function buildMarketsWhere({ category, q }) {
+  const where = buildOpenMarketWhere();
+
+  if (category === 'trending') {
+    where.OR = [{ isHot: true }, { sortScore: { gt: 0 } }];
+  } else if (category === 'closing') {
+    const now = new Date();
+    const closingAt = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+    where.endsAt = { gt: now, lte: closingAt };
+  } else if (category && category !== 'all') {
+    where.category = category;
+  }
+
+  if (q) {
+    where.OR = mergeOr(where.OR, [
+      { question: { contains: q, mode: 'insensitive' } },
+      { description: { contains: q, mode: 'insensitive' } },
+      { tag: { contains: q, mode: 'insensitive' } },
+      { sponsorName: { contains: q, mode: 'insensitive' } },
+    ]);
+  }
+
+  return where;
+}
+
+function buildOpenMarketWhere() {
+  return {
+    OR: [
+      { status: 'open' },
+      {
+        status: null,
+        resolution: null,
+      },
+    ],
+  };
+}
+
+function buildMarketsOrderBy(sort) {
+  switch (sort) {
+    case 'new':
+      return [{ createdAt: 'desc' }];
+    case 'ending':
+      return [{ endsAt: 'asc' }, { participantCount: 'desc' }];
+    case 'volume':
+      return [{ volumeScore: 'desc' }, { participantCount: 'desc' }];
+    case 'participants':
+      return [{ participantCount: 'desc' }, { volumeScore: 'desc' }];
+    case 'trending':
+      return [{ sortScore: 'desc' }, { isHot: 'desc' }, { participantCount: 'desc' }];
+    case 'hot':
+    default:
+      return [{ isHot: 'desc' }, { sortScore: 'desc' }, { participantCount: 'desc' }, { volumeScore: 'desc' }];
+  }
+}
+
+async function findMarketByIdOrSlug(app, idOrSlug, select) {
+  return app.prisma.market.findFirst({
+    where: {
+      OR: [{ id: idOrSlug }, { slug: idOrSlug }],
+    },
+    select,
+  });
+}
+
+function formatMarketListItem(market) {
+  const yes = toNumber(market.yesPct);
+  const no = clampPct(100 - yes);
+  const status = market.status || deriveMarketStatus(market);
+  const tag = market.tag || defaultTagForCategory(market.category);
+
+  return {
+    id: market.id,
+    slug: market.slug,
+    category: market.category,
+    icon: market.icon,
+    tag,
+    question: market.question,
+    q: market.question,
+    yes,
+    no,
+    status,
+    resolution: market.resolution || 'pending',
+    vol: formatVolume(market.volumeScore),
+    volume_score: bigIntToNumber(market.volumeScore),
+    p: formatParticipants(market.participantCount),
+    participant_count: market.participantCount,
+    ends: formatDateSlash(market.endsAt),
+    ends_at: market.endsAt,
+    hot: Boolean(market.isHot),
+    sponsored: Boolean(market.isSponsored),
+    sponsorName: market.sponsorName || null,
+    communityThreshold: market.communityThreshold,
+    sortScore: toNumber(market.sortScore || 0),
+    tc: tagClassForCategory(market.category),
+    created_at: market.createdAt,
+  };
+}
+
+function formatMarketDetail(market) {
+  const listItem = formatMarketListItem(market);
+  return {
+    ...listItem,
+    description: market.description || '',
+    resolution_source: market.resolutionSource || null,
+    resolved_at: market.resolvedAt,
+    updated_at: market.updatedAt,
+    metadata: {
+      community_threshold: market.communityThreshold,
+      sponsor_name: market.sponsorName || null,
+      sort_score: toNumber(market.sortScore || 0),
+    },
+  };
+}
+
+function normalizeDistribution(rows) {
+  const base = {
+    yes: { direction: 'yes', totalAmount: 0, count: 0 },
+    no: { direction: 'no', totalAmount: 0, count: 0 },
+  };
+
+  for (const row of rows || []) {
+    const direction = row.direction === 'no' ? 'no' : 'yes';
+    base[direction] = {
+      direction,
+      totalAmount: Number(row._sum.remainingAmount || 0),
+      count: row._count.direction || 0,
+    };
+  }
+
+  return [base.yes, base.no];
+}
+
+function deriveMarketStatus(market) {
+  if (market.status) return market.status;
+  if (market.resolution) {
+    return market.resolution === 'voided' ? 'voided' : 'resolved';
+  }
+  if (market.endsAt && new Date(market.endsAt) <= new Date()) {
+    return 'closed';
+  }
+  return 'open';
+}
+
+function defaultTagForCategory(category) {
+  const mapping = {
+    politics: '政治',
+    finance: '財經',
+    sports: '運動',
+    entertainment: '娛樂',
+    tech: '科技',
+    society: '社會',
+  };
+  return mapping[category] || '熱門';
+}
+
+function tagClassForCategory(category) {
+  const mapping = {
+    politics: 'politics',
+    finance: 'finance',
+    sports: 'sports',
+    entertainment: 'entertainment',
+    tech: 'tech',
+    society: 'society',
+  };
+  return mapping[category] || 'society';
+}
+
+function getHistorySince(range) {
+  if (range === 'ALL') return null;
+  const map = {
+    '1D': 1,
+    '1W': 7,
+    '1M': 30,
+    '3M': 90,
+  };
+  const days = map[range] || 7;
+  return new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+}
+
+function formatDateSlash(date) {
+  if (!date) return null;
+  const d = new Date(date);
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${yyyy}/${mm}/${dd}`;
+}
+
+function formatParticipants(count) {
+  return Number(count || 0).toLocaleString('zh-TW');
+}
+
+function formatVolume(value) {
+  const n = bigIntToNumber(value);
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M積分`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K積分`;
+  return `${n}積分`;
+}
+
+function bigIntToNumber(value) {
+  if (typeof value === 'bigint') return Number(value);
+  if (value == null) return 0;
+  if (typeof value === 'object' && typeof value.toString === 'function') {
+    return Number(value.toString());
+  }
+  return Number(value);
+}
+
+function toNumber(value) {
+  if (value == null) return 0;
+  if (typeof value === 'number') return value;
+  if (typeof value === 'bigint') return Number(value);
+  if (typeof value === 'object' && typeof value.toString === 'function') {
+    return Number(value.toString());
+  }
+  return Number(value);
+}
+
+function clampPct(value) {
+  return Math.max(0, Math.min(100, Number(value.toFixed ? value.toFixed(2) : value)));
 }
 
 function timeAgo(date) {
-  const mins = Math.floor((Date.now() - date) / 60000);
-  if (mins < 60)  return mins + '分鐘前';
-  if (mins < 1440) return Math.floor(mins / 60) + '小時前';
-  return Math.floor(mins / 1440) + '天前';
+  const diffMs = Date.now() - new Date(date).getTime();
+  const mins = Math.max(1, Math.floor(diffMs / 60000));
+  if (mins < 60) return `${mins}分鐘前`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}小時前`;
+  const days = Math.floor(hours / 24);
+  return `${days}天前`;
+}
+
+function mergeOr(existingOr, items) {
+  if (!existingOr || existingOr.length === 0) return items;
+  return existingOr.concat(items);
+}
+
+function successResponse(data, meta = {}) {
+  return {
+    data,
+    error: null,
+    meta,
+  };
+}
+
+function sendError(reply, statusCode, code, message, details = null) {
+  return reply.code(statusCode).send({
+    data: null,
+    error: {
+      code,
+      message,
+      details,
+    },
+    meta: {},
+  });
+}
+
+async function getCache(app, key) {
+  if (!app.redis) return null;
+  try {
+    const raw = await app.redis.get(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function setCache(app, key, payload, ttl) {
+  if (!app.redis) return;
+  try {
+    await app.redis.setex(key, ttl, JSON.stringify(payload));
+  } catch {
+    // ignore cache write errors
+  }
 }
