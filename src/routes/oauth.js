@@ -5,7 +5,6 @@ const { PrismaClient } = require('@prisma/client');
 
 const prisma = new PrismaClient();
 
-// OAuth Config - 使用環境變數，部署時在 Zeabur 設定
 const OAUTH = {
   google: {
     clientId: process.env.GOOGLE_CLIENT_ID,
@@ -27,12 +26,10 @@ const OAUTH = {
 
 const ACCESS_TTL = process.env.JWT_ACCESS_TTL || '15m';
 
-// Generate OAuth authorization URL
 function generateOAuthUrl(provider) {
   const config = OAUTH[provider];
   if (!config) throw new Error('Invalid provider');
   
-  // Check config based on provider
   if (provider === 'google' && !config.clientId) {
     throw new Error('Google OAuth not configured. Please set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.');
   }
@@ -48,11 +45,11 @@ function generateOAuthUrl(provider) {
       redirect_uri: config.redirectUri,
       response_type: 'code',
       scope: 'openid email profile',
-      state,
+      state: state,
       access_type: 'offline',
       prompt: 'consent'
     });
-    return { url: \`\${config.authUrl}?\${params}\`, state };
+    return { url: config.authUrl + '?' + params.toString(), state: state };
   }
   
   if (provider === 'line') {
@@ -61,14 +58,13 @@ function generateOAuthUrl(provider) {
       redirect_uri: config.redirectUri,
       response_type: 'code',
       scope: 'openid profile',
-      state,
+      state: state,
       bot_prompt: 'normal'
     });
-    return { url: \`\${config.authUrl}?\${params}\`, state };
+    return { url: config.authUrl + '?' + params.toString(), state: state };
   }
 }
 
-// Exchange code for tokens
 async function exchangeOAuthCode(provider, code) {
   const config = OAUTH[provider];
   if (!config) throw new Error('Invalid provider');
@@ -94,19 +90,18 @@ async function exchangeOAuthCode(provider, code) {
   const response = await fetch(config.tokenUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: params
+    body: params.toString()
   });
 
   return response.json();
 }
 
-// Get user info from OAuth provider
 async function getOAuthUserInfo(provider, accessToken) {
   const config = OAUTH[provider];
   
   if (provider === 'google') {
     const response = await fetch(config.userInfoUrl, {
-      headers: { Authorization: \`Bearer \${accessToken}\` }
+      headers: { 'Authorization': 'Bearer ' + accessToken }
     });
     const data = await response.json();
     return {
@@ -119,7 +114,7 @@ async function getOAuthUserInfo(provider, accessToken) {
   
   if (provider === 'line') {
     const response = await fetch(config.userInfoUrl, {
-      headers: { Authorization: \`Bearer \${accessToken}\` }
+      headers: { 'Authorization': 'Bearer ' + accessToken }
     });
     const data = await response.json();
     return {
@@ -131,7 +126,6 @@ async function getOAuthUserInfo(provider, accessToken) {
   }
 }
 
-// Find or create OAuth user
 async function findOrCreateOAuthUser(provider, providerId, email, name, picture) {
   const existingUser = await prisma.user.findFirst({
     where: {
@@ -146,8 +140,8 @@ async function findOrCreateOAuthUser(provider, providerId, email, name, picture)
     return prisma.user.update({
       where: { id: existingUser.id },
       data: {
-        ...(picture && { avatarUrl: picture }),
-        ...(name && { username: name })
+        ...(picture ? { avatarUrl: picture } : {}),
+        ...(name ? { username: name } : {})
       }
     });
   }
@@ -168,12 +162,12 @@ async function findOrCreateOAuthUser(provider, providerId, email, name, picture)
     }
   }
 
-  const username = \`\${provider}_\${providerId.substring(0, 8)}_\${Date.now()}\`;
+  const username = provider + '_' + providerId.substring(0, 8) + '_' + Date.now();
   
   return prisma.user.create({
     data: {
-      username,
-      email: email || \`\${provider}_\${providerId}@predic.local\`,
+      username: username,
+      email: email || provider + '_' + providerId + '@predic.local',
       passwordHash: crypto.randomBytes(32).toString('hex'),
       avatarUrl: picture || null,
       googleId: provider === 'google' ? providerId : null,
@@ -186,10 +180,9 @@ async function findOrCreateOAuthUser(provider, providerId, email, name, picture)
 
 module.exports = async function oauthRoutes(app) {
 
-  // Generate OAuth URL
   app.post('/v1/auth/oauth/:provider', async (req, reply) => {
     try {
-      const { provider } = req.params;
+      const provider = req.params.provider;
       if (!['google', 'line'].includes(provider)) {
         return reply.code(400).send({
           ok: false,
@@ -200,12 +193,12 @@ module.exports = async function oauthRoutes(app) {
       const { url, state } = generateOAuthUrl(provider);
       
       if (!app.oauthStates) app.oauthStates = new Map();
-      app.oauthStates.set(\`oauth_state_\${provider}_\${state}\`, {
+      app.oauthStates.set('oauth_state_' + provider + '_' + state, {
         createdAt: Date.now(),
         expiresAt: Date.now() + 10 * 60 * 1000
       });
 
-      return reply.send({ ok: true, data: { url, state } });
+      return reply.send({ ok: true, data: { url: url, state: state } });
     } catch (err) {
       app.log.error(err);
       return reply.code(500).send({
@@ -215,10 +208,11 @@ module.exports = async function oauthRoutes(app) {
     }
   });
 
-  // OAuth Callback
   app.post('/v1/auth/oauth/callback', async (req, reply) => {
     try {
-      const { provider, code, state } = req.body;
+      const provider = req.body.provider;
+      const code = req.body.code;
+      const state = req.body.state;
 
       if (!['google', 'line'].includes(provider)) {
         return reply.code(400).send({
@@ -227,7 +221,7 @@ module.exports = async function oauthRoutes(app) {
         });
       }
 
-      const storedState = app.oauthStates?.get(\`oauth_state_\${provider}_\${state}\`);
+      const storedState = app.oauthStates ? app.oauthStates.get('oauth_state_' + provider + '_' + state) : null;
       
       if (!storedState) {
         return reply.code(400).send({
@@ -237,14 +231,14 @@ module.exports = async function oauthRoutes(app) {
       }
 
       if (Date.now() > storedState.expiresAt) {
-        app.oauthStates.delete(\`oauth_state_\${provider}_\${state}\`);
+        if (app.oauthStates) app.oauthStates.delete('oauth_state_' + provider + '_' + state);
         return reply.code(400).send({
           ok: false,
           error: { code: 'STATE_EXPIRED', message: 'OAuth state expired' }
         });
       }
 
-      app.oauthStates.delete(\`oauth_state_\${provider}_\${state}\`);
+      if (app.oauthStates) app.oauthStates.delete('oauth_state_' + provider + '_' + state);
 
       const tokens = await exchangeOAuthCode(provider, code);
       
@@ -283,8 +277,8 @@ module.exports = async function oauthRoutes(app) {
       return reply.send({
         ok: true,
         data: {
-          accessToken,
-          refreshToken,
+          accessToken: accessToken,
+          refreshToken: refreshToken,
           user: {
             id: user.id,
             username: user.username,
@@ -308,11 +302,12 @@ module.exports = async function oauthRoutes(app) {
     }
   });
 
-  // Bind Social Media Account
   app.post('/v1/auth/bind-social', async (req, reply) => {
     try {
       await req.jwtVerify();
-      const { platform, platformId, username } = req.body;
+      const platform = req.body.platform;
+      const platformId = req.body.platformId;
+      const username = req.body.username;
       
       if (!['instagram', 'threads'].includes(platform)) {
         return reply.code(400).send({
@@ -361,7 +356,6 @@ module.exports = async function oauthRoutes(app) {
     }
   });
 
-  // Check social binding status
   app.get('/v1/auth/social-status', async (req, reply) => {
     try {
       await req.jwtVerify();
