@@ -65,6 +65,7 @@ async function buildApp() {
   // ── Routes ────────────────────────────────────────
   await app.register(require('./routes/health'), { prefix: '/health' });
   await app.register(require('./routes/auth'),    { prefix: '/v1/auth' });
+  await app.register(require('./routes/oauth'),  { prefix: '/v1/auth' });
   await app.register(require('./routes/markets'), { prefix: '/v1/markets' });
   await app.register(require('./routes/trades'),  { prefix: '/v1/trades' });
   await app.register(require('./routes/users'),   { prefix: '/v1/users' });
