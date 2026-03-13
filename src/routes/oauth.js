@@ -180,7 +180,7 @@ async function findOrCreateOAuthUser(provider, providerId, email, name, picture)
 
 module.exports = async function oauthRoutes(app) {
 
-  app.post('/v1/auth/oauth/:provider', async (req, reply) => {
+  app.post('/oauth/:provider', async (req, reply) => {
     try {
       const provider = req.params.provider;
       if (!['google', 'line'].includes(provider)) {
@@ -208,7 +208,7 @@ module.exports = async function oauthRoutes(app) {
     }
   });
 
-  app.post('/v1/auth/oauth/callback', async (req, reply) => {
+  app.post('/oauth/callback', async (req, reply) => {
     try {
       const provider = req.body.provider;
       const code = req.body.code;
@@ -302,7 +302,7 @@ module.exports = async function oauthRoutes(app) {
     }
   });
 
-  app.post('/v1/auth/bind-social', async (req, reply) => {
+  app.post('/bind-social', async (req, reply) => {
     try {
       await req.jwtVerify();
       const platform = req.body.platform;
@@ -356,7 +356,7 @@ module.exports = async function oauthRoutes(app) {
     }
   });
 
-  app.get('/v1/auth/social-status', async (req, reply) => {
+  app.get('/social-status', async (req, reply) => {
     try {
       await req.jwtVerify();
       
