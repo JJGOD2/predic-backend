@@ -21,6 +21,17 @@ model User {
   gem                 Int      @default(0)
   ntdBalance          Decimal  @default(0) @map("ntd_balance") @db.Decimal(12, 2)
 
+  // OAuth fields
+  googleId            String?  @unique @map("google_id") @db.VarChar(100)
+  lineId              String?  @unique @map("line_id") @db.VarChar(100)
+  appleId             String?  @unique @map("apple_id") @db.VarChar(100)
+  
+  // Social binding for proposals
+  boundInstagram          String?  @map("bound_instagram") @db.VarChar(100)
+  boundInstagramUsername  String?  @map("bound_instagram_username") @db.VarChar(100)
+  boundThreads            String?  @map("bound_threads") @db.VarChar(100)
+  boundThreadsUsername    String?  @map("bound_threads_username") @db.VarChar(100)
+
   isPro               Boolean   @default(false) @map("is_pro")
   proExpiresAt        DateTime? @map("pro_expires_at")
   proNotifEnabled     Boolean   @default(true) @map("pro_notif_enabled")
@@ -48,10 +59,25 @@ model User {
   referralsGiven      ReferralReward[] @relation("referrer")
   referralsReceived   ReferralReward[] @relation("referee")
   lotteryDrawLogs     LotteryDrawLog[]
+  refreshTokens       RefreshToken[]
 
   @@index([status])
   @@index([referralCode])
   @@map("users")
+}
+
+// ── OAuth ───────────────────────────────────────────
+model RefreshToken {
+  id          String    @id @default(uuid())
+  token       String    @unique
+  userId      String    @map("user_id")
+  expiresAt   DateTime  @map("expires_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("refresh_tokens")
 }
 
 model Market {
