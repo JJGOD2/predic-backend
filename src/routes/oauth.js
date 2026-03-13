@@ -182,7 +182,7 @@ async function findOrCreateOAuthUser(provider, providerId, email, name, picture)
 module.exports = async function oauthRoutes(app) {
 
   // Generate OAuth URL
-  app.post('/v1/auth/oauth/:provider', async (req, reply) => {
+  app.post('/oauth/:provider', async (req, reply) => {
     try {
       const { provider } = req.params;
       if (!['google', 'line'].includes(provider)) {
@@ -211,7 +211,7 @@ module.exports = async function oauthRoutes(app) {
   });
 
   // OAuth Callback
-  app.post('/v1/auth/oauth/callback', async (req, reply) => {
+  app.post('/oauth/callback', async (req, reply) => {
     try {
       const { provider, code, state } = req.body;
 
@@ -304,7 +304,7 @@ module.exports = async function oauthRoutes(app) {
   });
 
   // Bind Social Media Account
-  app.post('/v1/auth/bind-social', async (req, reply) => {
+  app.post('/bind-social', async (req, reply) => {
     try {
       await req.jwtVerify();
       const { platform, platformId, username } = req.body;
@@ -357,7 +357,7 @@ module.exports = async function oauthRoutes(app) {
   });
 
   // Check social binding status
-  app.get('/v1/auth/social-status', async (req, reply) => {
+  app.get('/social-status', async (req, reply) => {
     try {
       await req.jwtVerify();
       
