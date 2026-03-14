@@ -162,12 +162,14 @@ async function findOrCreateOAuthUser(provider, providerId, email, name, picture)
     }
   }
 
-  const username = provider + '_' + providerId.substring(0, 8) + '_' + Date.now();
+  const shortId = providerId.substring(0, 6) + Date.now().toString().slice(-6);
+  let username = provider + '_' + shortId;
+  if (username.length > 20) username = username.substring(0, 20);
   
   return prisma.user.create({
     data: {
       username: username,
-      email: email || provider + '_' + providerId + '@predic.local',
+      email: email || provider + '_' + providerId.substring(0, 30) + '@predic.local',
       passwordHash: crypto.randomBytes(32).toString('hex'),
       avatarUrl: picture || null,
       googleId: provider === 'google' ? providerId : null,
