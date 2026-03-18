@@ -68,7 +68,8 @@ async function buildApp() {
   await app.register(require('./routes/oauth'),  { prefix: '/v1/auth' });
   await app.register(require('./routes/markets'), { prefix: '/v1/markets' });
   await app.register(require('./routes/trades'),  { prefix: '/v1/trades' });
-  await app.register(require('./routes/users'),   { prefix: '/v1/users' });
+  await app.register(require('./routes/users'), { prefix: '/v1/users' });
+  await app.register(require('./routes/users-level'), { prefix: '/v1/users' });
   await app.register(require('./routes/notifications'), { prefix: '/v1/notifications' });
   await app.register(require('./routes/shop'),    { prefix: '/v1/shop' });
 

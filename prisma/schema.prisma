@@ -45,6 +45,17 @@ model User {
   referralCode        String?   @unique @map("referral_code") @db.VarChar(20)
   referredByCode      String?   @map("referred_by_code") @db.VarChar(20)
 
+  // 等級系統 (狼人殺角色)
+  level               Int       @default(1) // 等級 1-8
+  title              String?   @default("村民") // 稱號
+  correctCount       Int       @default(0) // 預測正確次數
+  consecutiveWins    Int       @default(0) // 連續正確次數
+  consecutiveLosses  Int       @default(0) // 連續錯誤次數
+  totalPredictions   Int       @default(0) // 總預測次數
+  
+  // 成就解鎖
+  achievements       String?   @default("[]") // JSON array of unlocked achievements
+
   createdAt           DateTime  @default(now()) @map("created_at")
   createdBy          String?   @map("created_by")
   updatedAt           DateTime  @updatedAt @map("updated_at")
