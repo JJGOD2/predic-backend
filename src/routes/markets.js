@@ -565,3 +565,42 @@ async function setCache(app, key, payload, ttl) {
     await app.redis.setex(key, ttl, JSON.stringify(payload));
   } catch {}
 }
+
+// POST /v1/markets - 建立新市場
+app.post('/', { preHandler: [app.authenticate] }, async (req, reply) => {
+  const { question, category, description, endsAt, icon, tag } = req.body || {};
+  
+  // 驗證
+  if (!question || question.trim().length < 5) {
+    return sendError(reply, 400, 'VALIDATION_ERROR', '問題至少需要 5 個字');
+  }
+  if (!category) {
+    return sendError(reply, 400, 'VALIDATION_ERROR', '請選擇類別');
+  }
+  if (!endsAt) {
+    return sendError(reply, 400, 'VALIDATION_ERROR', '請設定截止時間');
+  }
+  
+  // 生成 slug
+  const slug = question.slice(0, 50).toLowerCase()
+    .replace(/[^a-z0-9\u4e00-\u9fa5]/g, '-')
+    .replace(/-+/g, '-')
+    + '-' + Date.now();
+  
+  const userId = req.user.sub;
+  
+  const market = await app.prisma.market.create({
+    data: {
+      slug,
+      question: question.trim(),
+      category,
+      description: description || '',
+      icon: icon || '📈',
+      tag: tag || null,
+      endsAt: new Date(endsAt),
+      createdBy: userId,
+    },
+  });
+  
+  return reply.code(201).send(successResponse(market));
+});
