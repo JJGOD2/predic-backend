@@ -264,4 +264,304 @@ module.exports = async function marketsRoutes(app) {
   });
 };
 
-module.exports = async function marketsRoutes(app) {};
+function marketListSelect() {
+  return {
+    id: true,
+    slug: true,
+    category: true,
+    icon: true,
+    tag: true,
+    question: true,
+    yesPct: true,
+    status: true,
+    resolution: true,
+    volumeScore: true,
+    participantCount: true,
+    endsAt: true,
+    resolvedAt: true,
+    isHot: true,
+    isSponsored: true,
+    sponsorName: true,
+    communityThreshold: true,
+    sortScore: true,
+    createdAt: true,
+  };
+}
+
+function marketDetailSelect() {
+  return {
+    id: true,
+    slug: true,
+    category: true,
+    icon: true,
+    tag: true,
+    question: true,
+    description: true,
+    yesPct: true,
+    status: true,
+    resolution: true,
+    resolutionSource: true,
+    volumeScore: true,
+    participantCount: true,
+    endsAt: true,
+    resolvedAt: true,
+    isHot: true,
+    isSponsored: true,
+    sponsorName: true,
+    communityThreshold: true,
+    sortScore: true,
+    createdAt: true,
+    updatedAt: true,
+  };
+}
+
+function buildMarketsWhere({ category, q }) {
+  const andWhere = [buildOpenMarketWhere()];
+
+  if (category === 'trending') {
+    andWhere.push({
+      OR: [{ isHot: true }, { sortScore: { gt: 0 } }],
+    });
+  } else if (category === 'closing') {
+    const now = new Date();
+    const closingAt = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+    andWhere.push({
+      endsAt: { gt: now, lte: closingAt },
+    });
+  } else if (category && category !== 'all') {
+    andWhere.push({ category });
+  }
+
+  if (q) {
+    andWhere.push({
+      OR: [
+        { question: { contains: q, mode: 'insensitive' } },
+        { description: { contains: q, mode: 'insensitive' } },
+        { tag: { contains: q, mode: 'insensitive' } },
+        { sponsorName: { contains: q, mode: 'insensitive' } },
+        { slug: { contains: q, mode: 'insensitive' } },
+      ],
+    });
+  }
+
+  return andWhere.length === 1 ? andWhere[0] : { AND: andWhere };
+}
+
+function buildOpenMarketWhere() {
+  return { status: 'open' };
+}
+
+function buildMarketsOrderBy(sort) {
+  switch (sort) {
+    case 'new':
+      return [{ createdAt: 'desc' }];
+    case 'ending':
+      return [{ endsAt: 'asc' }, { participantCount: 'desc' }];
+    case 'volume':
+      return [{ volumeScore: 'desc' }, { participantCount: 'desc' }];
+    case 'participants':
+      return [{ participantCount: 'desc' }, { volumeScore: 'desc' }];
+    case 'trending':
+      return [{ sortScore: 'desc' }, { isHot: 'desc' }, { participantCount: 'desc' }];
+    case 'hot':
+    default:
+      return [{ isHot: 'desc' }, { sortScore: 'desc' }, { participantCount: 'desc' }, { volumeScore: 'desc' }];
+  }
+}
+
+async function findMarketByIdOrSlug(app, idOrSlug, select) {
+  return app.prisma.market.findFirst({
+    where: {
+      OR: [{ id: idOrSlug }, { slug: idOrSlug }],
+    },
+    select,
+  });
+}
+
+function formatMarketListItem(market) {
+  const yes = toNumber(market.yesPct);
+  const no = clampPct(100 - yes);
+  const status = market.status || deriveMarketStatus(market);
+  const tag = market.tag || defaultTagForCategory(market.category);
+
+  return {
+    id: market.id,
+    slug: market.slug,
+    category: market.category,
+    icon: market.icon,
+    tag,
+    question: market.question,
+    q: market.question,
+    yes,
+    no,
+    status,
+    resolution: market.resolution || 'pending',
+    vol: formatVolume(market.volumeScore),
+    volume_score: bigIntToNumber(market.volumeScore),
+    p: formatParticipants(market.participantCount),
+    participant_count: market.participantCount,
+    ends: formatDateSlash(market.endsAt),
+    ends_at: market.endsAt,
+    hot: Boolean(market.isHot),
+    sponsored: Boolean(market.isSponsored),
+    sponsorName: market.sponsorName || null,
+    communityThreshold: market.communityThreshold,
+    sortScore: toNumber(market.sortScore || 0),
+    tc: tagClassForCategory(market.category),
+    created_at: market.createdAt,
+  };
+}
+
+function formatMarketDetail(market) {
+  const listItem = formatMarketListItem(market);
+  return {
+    ...listItem,
+    description: market.description || '',
+    resolution_source: market.resolutionSource || null,
+    resolved_at: market.resolvedAt,
+    updated_at: market.updatedAt,
+    metadata: {
+      community_threshold: market.communityThreshold,
+      sponsor_name: market.sponsorName || null,
+      sort_score: toNumber(market.sortScore || 0),
+    },
+  };
+}
+
+function normalizeDistribution(rows) {
+  const base = {
+    yes: { direction: 'yes', totalAmount: 0, count: 0 },
+    no: { direction: 'no', totalAmount: 0, count: 0 },
+  };
+
+  for (const row of rows || []) {
+    const direction = row.direction === 'no' ? 'no' : 'yes';
+    base[direction] = {
+      direction,
+      totalAmount: Number(row._sum.remainingAmount || 0),
+      count: row._count.direction || 0,
+    };
+  }
+
+  return [base.yes, base.no];
+}
+
+function deriveMarketStatus(market) {
+  if (market.status) return market.status;
+  if (market.resolution) {
+    return market.resolution === 'voided' ? 'voided' : 'resolved';
+  }
+  if (market.endsAt && new Date(market.endsAt) <= new Date()) {
+    return 'closed';
+  }
+  return 'open';
+}
+
+function defaultTagForCategory(category) {
+  const mapping = {
+    politics: '政治',
+    finance: '財經',
+    sports: '運動',
+    entertainment: '娛樂',
+    tech: '科技',
+    society: '社會',
+  };
+  return mapping[category] || '熱門';
+}
+
+function tagClassForCategory(category) {
+  const mapping = {
+    politics: 'politics',
+    finance: 'finance',
+    sports: 'sports',
+    entertainment: 'entertainment',
+    tech: 'tech',
+    society: 'society',
+  };
+  return mapping[category] || 'society';
+}
+
+function getHistorySince(range) {
+  if (range === 'ALL') return null;
+  const map = { '1D': 1, '1W': 7, '1M': 30, '3M': 90 };
+  const days = map[range] || 7;
+  return new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+}
+
+function formatDateSlash(date) {
+  if (!date) return null;
+  const d = new Date(date);
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${yyyy}/${mm}/${dd}`;
+}
+
+function formatParticipants(count) {
+  return Number(count || 0).toLocaleString('zh-TW');
+}
+
+function formatVolume(value) {
+  const n = bigIntToNumber(value);
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M積分`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K積分`;
+  return `${n}積分`;
+}
+
+function bigIntToNumber(value) {
+  if (typeof value === 'bigint') return Number(value);
+  if (value == null) return 0;
+  if (typeof value === 'object' && typeof value.toString === 'function') return Number(value.toString());
+  return Number(value);
+}
+
+function toNumber(value) {
+  if (value == null) return 0;
+  if (typeof value === 'number') return value;
+  if (typeof value === 'bigint') return Number(value);
+  if (typeof value === 'object' && typeof value.toString === 'function') return Number(value.toString());
+  return Number(value);
+}
+
+function clampPct(value) {
+  return Math.max(0, Math.min(100, Number(value.toFixed ? value.toFixed(2) : value)));
+}
+
+function timeAgo(date) {
+  const diffMs = Date.now() - new Date(date).getTime();
+  const mins = Math.max(1, Math.floor(diffMs / 60000));
+  if (mins < 60) return `${mins}分鐘前`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}小時前`;
+  const days = Math.floor(hours / 24);
+  return `${days}天前`;
+}
+
+function successResponse(data, meta = {}) {
+  return { data, error: null, meta };
+}
+
+function sendError(reply, statusCode, code, message, details = null) {
+  return reply.code(statusCode).send({
+    data: null,
+    error: { code, message, details },
+    meta: {},
+  });
+}
+
+async function getCache(app, key) {
+  if (!app.redis) return null;
+  try {
+    const raw = await app.redis.get(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function setCache(app, key, payload, ttl) {
+  if (!app.redis) return;
+  try {
+    await app.redis.setex(key, ttl, JSON.stringify(payload));
+  } catch {}
+}
