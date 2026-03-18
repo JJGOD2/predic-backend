@@ -264,6 +264,182 @@ module.exports = async function marketsRoutes(app) {
   });
 };
 
+  // ═══════════════════════════════════════════════
+  // Comments API
+  // ═══════════════════════════════════════════════
+  
+  // GET /v1/markets/:idOrSlug/comments - 獲取評論列表
+  app.get('/:idOrSlug/comments', async (req, reply) => {
+    const { idOrSlug } = req.params;
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 20));
+    const direction = req.query.direction; // 'yes', 'no', or undefined for all
+    
+    // 先找到 market id
+    const market = await app.prisma.market.findFirst({
+      where: {
+        OR: [
+          { id: idOrSlug },
+          { slug: idOrSlug }
+        ]
+      },
+      select: { id: true }
+    });
+    
+    if (!market) {
+      return sendError(reply, 404, 'MARKET_NOT_FOUND', '找不到該市場');
+    }
+    
+    const where = {
+      marketId: market.id,
+      ...(direction ? { direction } : {})
+    };
+    
+    const [comments, total] = await Promise.all([
+      app.prisma.marketComment.findMany({
+        where,
+        include: {
+          user: {
+            select: {
+              id: true,
+              username: true,
+              avatarUrl: true,
+              isPro: true
+            }
+          }
+        },
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit
+      }),
+      app.prisma.marketComment.count({ where })
+    ]);
+    
+    const items = comments.map(c => ({
+      id: c.id,
+      content: c.content,
+      direction: c.direction,
+      likes: c.likes,
+      parent_id: c.parentId,
+      created_at: c.createdAt,
+      user: {
+        id: c.user.id,
+        username: c.user.username,
+        avatar_url: c.user.avatarUrl,
+        is_pro: c.user.isPro
+      }
+    }));
+    
+    return reply.send(successResponse(items, {
+      total,
+      page,
+      limit,
+      has_more: page * limit < total
+    }));
+  });
+  
+  // POST /v1/markets/:idOrSlug/comments - 發表評論
+  app.post('/:idOrSlug/comments', { preHandler: [app.authenticate] }, async (req, reply) => {
+    const { idOrSlug } = req.params;
+    const { content, direction, parent_id } = req.body || {};
+    
+    // 驗證輸入
+    if (!content || typeof content !== 'string' || content.trim().length === 0) {
+      return sendError(reply, 400, 'VALIDATION_ERROR', '評論內容不能為空');
+    }
+    
+    if (content.length > 500) {
+      return sendError(reply, 400, 'VALIDATION_ERROR', '評論內容不能超過 500 字');
+    }
+    
+    if (!direction || !['yes', 'no'].includes(direction.toLowerCase())) {
+      return sendError(reply, 400, 'VALIDATION_ERROR', 'direction 必須是 yes 或 no');
+    }
+    
+    // 找到 market
+    const market = await app.prisma.market.findFirst({
+      where: {
+        OR: [
+          { id: idOrSlug },
+          { slug: idOrSlug }
+        ]
+      },
+      select: { id: true, question: true }
+    });
+    
+    if (!market) {
+      return sendError(reply, 404, 'MARKET_NOT_FOUND', '找不到該市場');
+    }
+    
+    const userId = req.user.sub;
+    
+    // 建立評論
+    const comment = await app.prisma.marketComment.create({
+      data: {
+        marketId: market.id,
+        userId,
+        content: content.trim(),
+        direction: direction.toLowerCase(),
+        parentId: parent_id || null
+      },
+      include: {
+        user: {
+          select: {
+            id: true,
+            username: true,
+            avatarUrl: true,
+            isPro: true
+          }
+        }
+      }
+    });
+    
+    const response = {
+      id: comment.id,
+      content: comment.content,
+      direction: comment.direction,
+      likes: comment.likes,
+      parent_id: comment.parentId,
+      created_at: comment.createdAt,
+      user: {
+        id: comment.user.id,
+        username: comment.user.username,
+        avatar_url: comment.user.avatarUrl,
+        is_pro: comment.user.isPro
+      }
+    };
+    
+    return reply.code(201).send(successResponse(response));
+  });
+  
+  // DELETE /v1/markets/:idOrSlug/comments/:commentId - 刪除評論
+  app.delete('/:idOrSlug/comments/:commentId', { preHandler: [app.authenticate] }, async (req, reply) => {
+    const { commentId } = req.params;
+    const userId = req.user.sub;
+    
+    const comment = await app.prisma.marketComment.findUnique({
+      where: { id: commentId },
+      select: { userId: true, marketId: true }
+    });
+    
+    if (!comment) {
+      return sendError(reply, 404, 'COMMENT_NOT_FOUND', '找不到該評論');
+    }
+    
+    // 只能刪除自己的評論
+    if (comment.userId !== userId) {
+      return sendError(reply, 403, 'FORBIDDEN', '無法刪除他人的評論');
+    }
+    
+    await app.prisma.marketComment.delete({
+      where: { id: commentId }
+    });
+    
+    return reply.send(successResponse({ deleted: true }));
+  });
+
+};
+
 function marketListSelect() {
   return {
     id: true,
