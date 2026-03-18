@@ -438,8 +438,6 @@ module.exports = async function marketsRoutes(app) {
     return reply.send(successResponse({ deleted: true }));
   });
 
-};
-
 function marketListSelect() {
   return {
     id: true,
