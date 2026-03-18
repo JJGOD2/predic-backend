@@ -46,6 +46,7 @@ model User {
   referredByCode      String?   @map("referred_by_code") @db.VarChar(20)
 
   createdAt           DateTime  @default(now()) @map("created_at")
+  createdBy          String?   @map("created_by")
   updatedAt           DateTime  @updatedAt @map("updated_at")
 
   trades              Trade[]
@@ -108,6 +109,7 @@ model Market {
   communityThreshold  Int       @default(2000) @map("community_threshold")
 
   createdAt           DateTime  @default(now()) @map("created_at")
+  createdBy          String?   @map("created_by")
   updatedAt           DateTime  @updatedAt @map("updated_at")
 
   trades              Trade[]
